@@ -12,7 +12,7 @@ $worker = new \Workerman\Worker("http://127.0.0.1:1234");
 $worker->count=4;
 
 $worker->onMessage=function ($connection,$data){
-    print_r($_GET);
+    print_r($_POST);
     $connection->send("hello,world");
 };
 
