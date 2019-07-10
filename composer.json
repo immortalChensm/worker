@@ -1,0 +1,16 @@
+{
+    "name": "immortalchensm/worker",
+    "description": "socket test",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "immortalChensm",
+            "email": "1655664358@qq.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "require": {
+        "workerman/workerman": "dev-master"
+    }
+}
