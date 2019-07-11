@@ -148,23 +148,29 @@ public static function runAll()
            }
    
            // Log file.
+           //workerman日志文件
            if (empty(static::$logFile)) {
                static::$logFile = __DIR__ . '/../workerman.log';
            }
            $log_file = (string)static::$logFile;
+           //创建日志文件
            if (!is_file($log_file)) {
                touch($log_file);
                chmod($log_file, 0622);
            }
    
            // State.
+           //状态初始值
            static::$_status = static::STATUS_STARTING;
    
            // For statistics.
-           static::$_globalStatistics['start_timestamp'] = time();
+           //启动时间
+           static::$_globalStatistics['start_timestamp'] = time(); 
+           //sys_get_temp_dir()取得临时目录+启动文件的唯一后缀名称
            static::$_statisticsFile                      = sys_get_temp_dir() . "/$unique_prefix.status";
    
            // Process title.
+           //设置进程名称
            static::setProcessTitle('WorkerMan: master process  start_file=' . static::$_startFile);
    
            // Init data for worker id.
@@ -367,9 +373,333 @@ public static function runAll()
    32768 【建议你在linux上测试，免得你真看不懂我在写什么飞机】    
    
    至此解释完毕【如果没有看请去看php官方文档的函数说明，如果还看不懂建议去linux玩一下stat命令】  
-   还看不懂【？那我没有办法了】   
+   还看不懂【？那我没有办法了】     
+   
+   设置进程名称  
+   ```php  
+   protected static function setProcessTitle($title)
+       {
+           set_error_handler(function(){});
+           // >=php 5.5
+           if (function_exists('cli_set_process_title')) {
+           //设置运行在cli模式下的进程名称，当你用ps,pstree等命令查看可以以看到
+               cli_set_process_title($title);
+           } // Need proctitle when php<=5.5 .
+           elseif (extension_loaded('proctitle') && function_exists('setproctitle')) {
+               setproctitle($title);
+           }
+           restore_error_handler();
+       }
+   ```
+   
+   初始化id  
+   ```php  
+   protected static function initId()
+       {
+       /**
+       new Wokrer()实例化的时候初始化了这3坨变量
+        $this->workerId                    = spl_object_hash($this);
+               static::$_workers[$this->workerId] = $this;
+               static::$_pidMap[$this->workerId]  = array();
+       **/
+       //在实例化worker实例的时候，自动生成的数组
+           foreach (static::$_workers as $worker_id => $worker) {
+               $new_id_map = array();
+               //检测用户设置的进程数量
+               //没给就默认为一个进程数
+               $worker->count = $worker->count <= 0 ? 1 : $worker->count;
+               for($key = 0; $key < $worker->count; $key++) {
+                   $new_id_map[$key] = isset(static::$_idMap[$worker_id][$key]) ? static::$_idMap[$worker_id][$key] : 0;
+                   /**
+                   
+                   $new_id_map[0]=0
+                   $new_id_map[1]=0
+                   $new_id_map[2]=0
+                   $new_id_map[3]=0
+                   **/
+               }
+               static::$_idMap[$worker_id] = $new_id_map;
+           }
+       }
+   ```  
+   
+   定时器初始化  
+   ` Timer::init();`    
+   初始化源码  
+   ```php  
+   public static function init($event = null)
+       {
+           if ($event) {
+               self::$_event = $event;
+           } else { 
+           //检测是否有pcntl扩展函数【linux有用】
+           //安装一个定时信息处理器【指定时间一到就会运行指定的方法】  
+           //定时器即pcntl_alarm会发送一个SIGALRM信号触发它
+               if (function_exists('pcntl_signal')) {
+                   pcntl_signal(SIGALRM, array('\Workerman\Lib\Timer', 'signalHandle'), false);
+               }
+           }
+       }
+   ```  
+   
+   时钟信息处理器  
+   ```php  
+   public static function signalHandle()
+       {
+       //当时间一到的话，就会运行此方法，并且是每隔1秒就会再运行，再次触发，无限循环
+           if (!self::$_event) {
+               pcntl_alarm(1);
+               self::tick();
+           }
+       }
+   ```  
+   
+   定时任务  
+   ```php  
+   public static function tick()
+       {
+       //没有定时任务的话，直接取消定时功能
+           if (empty(self::$_tasks)) {
+               pcntl_alarm(0);
+               return;
+           }
+   
+   //后面分析到定时任务再来看这里
+           $time_now = time();
+           foreach (self::$_tasks as $run_time => $task_data) {
+               if ($time_now >= $run_time) {
+                   foreach ($task_data as $index => $one_task) {
+                       $task_func     = $one_task[0];
+                       $task_args     = $one_task[1];
+                       $persistent    = $one_task[2];
+                       $time_interval = $one_task[3];
+                       try {
+                           call_user_func_array($task_func, $task_args);
+                       } catch (\Exception $e) {
+                           Worker::safeEcho($e);
+                       }
+                       if ($persistent) {
+                           self::add($time_interval, $task_func, $task_args);
+                       }
+                   }
+                   unset(self::$_tasks[$run_time]);
+               }
+           }
+       }
+   ```
    
    
+   - 分析`static::lock();`操作  
+   源码
+   ```php  
+    protected static function lock()
+       {
+       //打开启动文件【就是你php xxx start的时候获取到的启动文件】
+           $fd = fopen(static::$_startFile, 'r');
+           
+           if (!$fd || !flock($fd, LOCK_EX)) {
+               static::log("Workerman[".static::$_startFile."] already running");
+               exit;
+           }
+       }
+   ```
    
-     
+   - `static::parseCommand();`  
+   ```php  
+   protected static function parseCommand()
+       {
+       //不是linux的话直接返回 
+       //win环境下是不不会运行本方法的【记得在linux上测试】
+           if (static::$_OS !== OS_TYPE_LINUX) {
+               return;
+           }
+           //获取数据源【在终端输入的参数】
+           global $argv;
+           // Check argv;
+           //php启动文件
+           $start_file = $argv[0];
+           //启动命令
+           $available_commands = array(
+               'start',
+               'stop',
+               'restart',
+               'reload',
+               'status',
+               'connections',
+           );
+           
+           //如果用户输入启动命令错误，则打印使用方法
+           $usage = "Usage: php yourfile <command> [mode]\nCommands: \nstart\t\tStart worker in DEBUG mode.\n\t\tUse mode -d to start in DAEMON mode.\nstop\t\tStop worker.\n\t\tUse mode -g to stop gracefully.\nrestart\t\tRestart workers.\n\t\tUse mode -d to start in DAEMON mode.\n\t\tUse mode -g to stop gracefully.\nreload\t\tReload codes.\n\t\tUse mode -g to reload gracefully.\nstatus\t\tGet worker status.\n\t\tUse mode -d to show live status.\nconnections\tGet worker connections.\n";
+           if (!isset($argv[1]) || !in_array($argv[1], $available_commands)) {
+               if (isset($argv[1])) {
+                   static::safeEcho('Unknown command: ' . $argv[1] . "\n");
+               }
+               exit($usage);
+           }
+   
+           // Get command.
+           //取得启动命令
+           $command  = trim($argv[1]);
+           $command2 = isset($argv[2]) ? $argv[2] : '';
+   
+           // Start command.
+           $mode = '';
+           //进程启动模式  守护进程或是调试模式
+           if ($command === 'start') {
+               if ($command2 === '-d' || static::$daemonize) {
+                   $mode = 'in DAEMON mode';
+               } else {
+                   $mode = 'in DEBUG mode';
+               }
+           }
+           static::log("Workerman[$start_file] $command $mode");
+   
+           // Get master process PID.
+           //进程信号列表 https://www.php.net/manual/zh/pcntl.constants.php
+           $master_pid      = is_file(static::$pidFile) ? file_get_contents(static::$pidFile) : 0;
+           //posix_kill($master_pid, 0) 0用于检测进程是否存在
+           //posix_getpid() 取得当前进程id 
+           //刚启动的时候是没有用的
+           $master_is_alive = $master_pid && posix_kill($master_pid, 0) && posix_getpid() != $master_pid;
+           // Master is still alive?
+           if ($master_is_alive) {
+           //当前主进程已经存在，但还在启动就直接退出
+               if ($command === 'start') {
+                   static::log("Workerman[$start_file] already running");
+                   exit;
+               }
+           } elseif ($command !== 'start' && $command !== 'restart') {
+               static::log("Workerman[$start_file] not run");
+               exit;
+               //主进程未启动的处理
+           }
+   
+           // execute command.
+           switch ($command) {
+               case 'start'://假设我们运行的是php xxx.php start，下面的代码就暂时不分析【在linux上】
+                   if ($command2 === '-d') {
+                       static::$daemonize = true;
+                   }
+                   break;
+               case 'status':
+                   while (1) {
+                   //临时文件是否存在
+                       if (is_file(static::$_statisticsFile)) {
+                           @unlink(static::$_statisticsFile);
+                       }
+                       // Master process will send SIGUSR2 signal to all child processes. 
+                       //发送进程终止信号 
+                       posix_kill($master_pid, SIGUSR2);
+                       // Sleep 1 second.
+                       sleep(1);
+                       // Clear terminal.
+                       if ($command2 === '-d') {
+                           static::safeEcho("\33[H\33[2J\33(B\33[m", true);
+                       }
+                       // Echo status data.
+                       static::safeEcho(static::formatStatusData());
+                       if ($command2 !== '-d') {
+                           exit(0);
+                       }
+                       static::safeEcho("\nPress Ctrl+C to quit.\n\n");
+                   }
+                   exit(0);
+               case 'connections':
+                   if (is_file(static::$_statisticsFile) && is_writable(static::$_statisticsFile)) {
+                       unlink(static::$_statisticsFile);
+                   }
+                   // Master process will send SIGIO signal to all child processes.
+                   posix_kill($master_pid, SIGIO);
+                   // Waiting amoment.
+                   usleep(500000);
+                   // Display statisitcs data from a disk file.
+                   if(is_readable(static::$_statisticsFile)) {
+                       readfile(static::$_statisticsFile);
+                   }
+                   exit(0);
+               case 'restart':
+               case 'stop':
+                   if ($command2 === '-g') {
+                       static::$_gracefulStop = true;
+                       $sig = SIGTERM;
+                       static::log("Workerman[$start_file] is gracefully stopping ...");
+                   } else {
+                       static::$_gracefulStop = false;
+                       $sig = SIGINT;
+                       static::log("Workerman[$start_file] is stopping ...");
+                   }
+                   // Send stop signal to master process.
+                   $master_pid && posix_kill($master_pid, $sig);
+                   // Timeout.
+                   $timeout    = 5;
+                   $start_time = time();
+                   // Check master process is still alive?
+                   while (1) {
+                       $master_is_alive = $master_pid && posix_kill($master_pid, 0);
+                       if ($master_is_alive) {
+                           // Timeout?
+                           if (!static::$_gracefulStop && time() - $start_time >= $timeout) {
+                               static::log("Workerman[$start_file] stop fail");
+                               exit;
+                           }
+                           // Waiting amoment.
+                           usleep(10000);
+                           continue;
+                       }
+                       // Stop success.
+                       static::log("Workerman[$start_file] stop success");
+                       if ($command === 'stop') {
+                           exit(0);
+                       }
+                       if ($command2 === '-d') {
+                           static::$daemonize = true;
+                       }
+                       break;
+                   }
+                   break;
+               case 'reload':
+                   if($command2 === '-g'){
+                       $sig = SIGQUIT;
+                   }else{
+                       $sig = SIGUSR1;
+                   }
+                   posix_kill($master_pid, $sig);
+                   exit;
+               default :
+                   if (isset($command)) {
+                       static::safeEcho('Unknown command: ' . $command . "\n");
+                   }
+                   exit($usage);
+           }
+       }
+
+   ```  
+   - start启动  
+   ```php  
+    protected static function daemonize()
+       {
+       //如果是win的话这整个逻辑也不用看了【所以记得在linux上测试，ok？】 
+       //
+           if (!static::$daemonize || static::$_OS !== OS_TYPE_LINUX) {
+               return;
+           }
+           umask(0);
+           $pid = pcntl_fork();
+           if (-1 === $pid) {
+               throw new Exception('fork fail');
+           } elseif ($pid > 0) {
+               exit(0);
+           }
+           if (-1 === posix_setsid()) {
+               throw new Exception("setsid fail");
+           }
+           // Fork again avoid SVR4 system regain the control of terminal.
+           $pid = pcntl_fork();
+           if (-1 === $pid) {
+               throw new Exception("fork fail");
+           } elseif (0 !== $pid) {
+               exit(0);
+           }
+       }
+   ```
    

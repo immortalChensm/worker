@@ -21,3 +21,8 @@ $obj = new A();
 //echo $id;
 
 $obj->show($b);
+
+$fd = fopen("demo.php","r");
+if (!$fd){
+    echo 1;
+}
