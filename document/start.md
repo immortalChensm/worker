@@ -679,21 +679,33 @@ public static function runAll()
     protected static function daemonize()
        {
        //如果是win的话这整个逻辑也不用看了【所以记得在linux上测试，ok？】 
-       //
+       //进程fork之后会复制当前的父进程【包括程序代码区，数据区【常量区，全局数据区，堆区，栈区】
+       //每个进程都有自己的进程标识信息 
+       //进程的创建由fork分叉函数来完成
+       //进程的退出可由exit来调用
+       //pcntl进程管理在win上不支持！！！具体请看官方文档手册，别在win上测试没有用的
            if (!static::$daemonize || static::$_OS !== OS_TYPE_LINUX) {
                return;
            }
            umask(0);
+           /**
+           创建一个子进程
+           进程创建成功后会返回2个值，分别是0和子进程的PID值 
+           进程的退出可使用exit返回
+           **/
            $pid = pcntl_fork();
            if (-1 === $pid) {
                throw new Exception('fork fail');
-           } elseif ($pid > 0) {
-               exit(0);
+           } elseif ($pid > 0) {//在父进程中返回的是子进程PID
+               exit(0);//父进程退出
            }
+           //设置当前进程的session id
            if (-1 === posix_setsid()) {
                throw new Exception("setsid fail");
            }
            // Fork again avoid SVR4 system regain the control of terminal.
+           //再次创建一个子进程 
+           //该子进程会继续运行后面的代码
            $pid = pcntl_fork();
            if (-1 === $pid) {
                throw new Exception("fork fail");
@@ -701,5 +713,429 @@ public static function runAll()
                exit(0);
            }
        }
+   ```  
+   
+   初始化worker实例  
+   ```php    
+   
+   //本方法是运行某个子进程下的，前面已经fork了一个子进程
+   protected static function initWorkers()
+       {
+       //同样检测系统环境
+           if (static::$_OS !== OS_TYPE_LINUX) {
+               return;
+           }
+           /**
+           在实例化的时候就存储起来了
+           $this->workerId                    = spl_object_hash($this);
+                   static::$_workers[$this->workerId] = $this;
+                   static::$_pidMap[$this->workerId]  = array();
+           **/
+           foreach (static::$_workers as $worker) {
+               // Worker name. 
+               // public $name = 'none';  用户在实例时如果设置了name的话就使用用户设置的内容
+               //否则默认为none
+               //具体作用可看手册http://doc.workerman.net/worker/name.html  
+               //用于设置worker实例的名字
+               if (empty($worker->name)) {
+                   $worker->name = 'none';
+               }
+   
+               // Get unix user of the worker process.
+               //设置worker实例的运行用户
+               if (empty($worker->user)) {
+                   $worker->user = static::getCurrentUser();
+               } else {
+               //一般来说调用当前进程的用户标识ID都是0
+                   if (posix_getuid() !== 0 && $worker->user != static::getCurrentUser()) {
+                       static::log('Warning: You must have the root privileges to change uid and gid.');
+                   }
+               }
+   
+               // Socket name. 
+               //获取实例时传递的所谓协议
+               $worker->socket = $worker->getSocketName();
+   
+               // Status name.
+               //状态初始
+               $worker->status = '<g> [OK] </g>';
+   
+               // Get column mapping for UI 
+               /**
+               static::getUiColumns()返回的内容
+               column_map = array(
+                           'proto'     =>  'transport',
+                           'user'      =>  'user',
+                           'worker'    =>  'name',
+                           'socket'    =>  'socket',
+                           'processes' =>  'count',
+                           'status'    =>  'status',
+                       );
+            
+                   
+               **/
+               foreach(static::getUiColumns() as $column_name => $prop){
+                    //检测不存在此成员的话，就默认给他个'NNNN'的数据
+                   !isset($worker->{$prop}) && $worker->{$prop}= 'NNNN';
+                   //得到此成员的字符长度
+                   $prop_length = strlen($worker->{$prop});
+                   //构造一个key
+                   $key = '_max' . ucfirst(strtolower($column_name)) . 'NameLength'; 
+                   //比较长度大小，并重新给值
+                   static::$$key = max(static::$$key, $prop_length);
+               }
+   
+               // Listen.
+               if (!$worker->reusePort) {
+                   $worker->listen();
+               }
+           }
+       }
+   ```  
+   
+   ```php   
+   //得到当前运行的用户账号
+    protected static function getCurrentUser()
+       {
+       //posix_getuid() 获取当前进程的用户id
+       //posix_getpwuid() 根据用户id获取用户相关信息  
+       //主要包括用户的账号，shell,目录，密码等的一个数组 
+       //这此都是进程的一些标识信息
+       //https://www.php.net/manual/zh/function.posix-getpwuid.php
+           $user_info = posix_getpwuid(posix_getuid());
+           return $user_info['name'];
+       }
+   ```  
+   
+   得到socketName   
+   ```php  
+   public function getSocketName()
+       {
+       //"http://127.0.0.1:1234" 返回实例化传递的参数
+           return $this->_socketName ? lcfirst($this->_socketName) : 'none';
+       }
+   ```  
+   
+   - listen    
+   
+   ```php  
+   public function listen()
+       {
+       //未设置监听协议时
+           if (!$this->_socketName) {
+               return;
+           }
+   
+           // Autoload.
+           // $this->_autoloadRootPath = dirname($backtrace[0]['file']);  
+           //在实例化的时候，就已经得到当前启动脚本的目录了
+           Autoloader::setRootPath($this->_autoloadRootPath);
+   
+           if (!$this->_mainSocket) {
+               // Get the application layer communication protocol and listening address.
+               //处理监听协议得到协议名称和监听ip
+               list($scheme, $address) = explode(':', $this->_socketName, 2);
+               // Check application layer protocol class. 
+               /**
+               通信协议【传输层的协议】
+                protected static $_builtinTransports = array(
+                       'tcp'   => 'tcp',
+                       'udp'   => 'udp',
+                       'unix'  => 'unix',
+                       'ssl'   => 'tcp'
+                   );
+               **/
+               //支持tcp,udp,unix,ssl协议
+               //这里假设我们用的tcp协议
+               //tcp是一种基于字节流的协议
+               //udp则是数据报协议
+               //他们的区别主要是tcp在写数据时【数据从用户空间复制到tcp内核空间】
+               //tcp模块在发送数据的时候会进行封装为tcp数据并发送【有可能封装成一个或是多个】
+               //tcp模块在接收的时候也可能是一次性接受或多读读取 
+               
+               //udp模块则是每一次发送数据时，会封装成udp数据报，并立马发送，同时对应的接收端也要急时 
+               //的接受，不然丢失管我毛事 
+               
+               //tcp在发送前会进行发送SYN连接请求，必须得到对方的应答ACK报文【所谓的三次握手】 
+               //然后它在应答即可完成连接并处于ESTABLISHED状态，双方即可实现通信
+               //不然tcp会进行再次发起RST请求，也就是它是采用应答机制+超时重传机制确认数据能稳定的传输 
+               
+               //具体可以查阅本人写过的文章 
+               //unix是一种本地域协议，就通过文件流来实现通信，一般用于本地通信
+               //tcp,udp他们的通信靠ip,port，而unix就是靠一个文件描述符
+               
+               if (!isset(static::$_builtinTransports[$scheme])) {
+                   $scheme         = ucfirst($scheme);
+                   //得到协议名称http://127.0.0.1:1234[假设】
+                   $this->protocol = substr($scheme,0,1)==='\\' ? $scheme : '\\Protocols\\' . $scheme;
+                   //检查协议类文件
+                   //Http.php协议类文件是否存在的
+                   if (!class_exists($this->protocol)) {
+                       $this->protocol = "\\Workerman\\Protocols\\$scheme";
+                       if (!class_exists($this->protocol)) {
+                           throw new Exception("class \\Protocols\\$scheme not exist");
+                       }
+                   }
+   
+                   if (!isset(static::$_builtinTransports[$this->transport])) {
+                       throw new \Exception('Bad worker->transport ' . var_export($this->transport, true));
+                   }
+               } else {
+                   $this->transport = $scheme;
+               }
+               
+               //$this->protocol=tcp
+   
+                //构造起tcp:ip的字符串
+               $local_socket = static::$_builtinTransports[$this->transport] . ":" . $address;
+   
+               // Flag.
+               //传输层协议【tcp,udp】两者区别已经说过了，具体可以查看TCP/IP卷
+               $flags = $this->transport === 'udp' ? STREAM_SERVER_BIND : STREAM_SERVER_BIND | STREAM_SERVER_LISTEN;
+               $errno = 0;
+               $errmsg = '';
+               // SO_REUSEPORT.
+               //流相关函数手册https://www.php.net/manual/zh/function.stream-context-set-option.php
+               
+               if ($this->reusePort) {
+               //是否复用端口【这是流的选项配置】
+               //一般设置流的连接属性，都是在创建之前设置
+                   stream_context_set_option($this->_context, 'socket', 'so_reuseport', 1);
+               }
+   
+               // Create an Internet or Unix domain server socket.
+               //php手册https://www.php.net/manual/zh/function.stream-socket-server.php
+               //功能创建一个tcp/udp的套接字
+               //具体可以参考tcp/ip传输层和socket API的相关参数
+               //并了解tcp/ip传输层的相关说明
+               /**
+               一般socket api 都是
+               create,bind,listen,accpet,write,close ,set_socketopt,get_setsockopt
+               send,recv,recvfrom,sendto等等函数【请自己去查资料哦】
+               **/
+               $this->_mainSocket = stream_socket_server($local_socket, $errno, $errmsg, $flags, $this->_context);
+               if (!$this->_mainSocket) {
+               //创建失败后
+                   throw new Exception($errmsg);
+               }
+   
+                //ssl的我们暂时先不管【反正我现在不管】
+               if ($this->transport === 'ssl') {
+                   stream_socket_enable_crypto($this->_mainSocket, false);
+               } elseif ($this->transport === 'unix') {
+               /**
+               这是一般用于本地的通信，通过读写文件socket文件流来实现数据的传输和接受
+               即unix本地域
+               至此你应该知道不同的协议，参数是不一样的
+               tcp/upd通信则是ip和port
+               unix本地域则是一个文件
+               **/
+                   $socketFile = substr($address, 2);
+                   if ($this->user) {
+                   //修改sockfile文件的所属主
+                       chown($socketFile, $this->user);
+                   }
+                   if ($this->group) {
+                   //修改sockfile文件的所属组
+                       chgrp($socketFile, $this->group);
+                   }
+               }
+   
+               // Try to open keepalive for tcp and disable Nagle algorithm.
+               if (function_exists('socket_import_stream') && static::$_builtinTransports[$this->transport] === 'tcp') {
+                   set_error_handler(function(){});
+                   //是tcp传输层协议的话导入创建好的流构建socket
+                   //https://secure.php.net/manual/en/function.socket-import-stream.php
+                   $socket = socket_import_stream($this->_mainSocket);
+                   //设置tcp选项，选项还可以通过linux进行修改配置
+                   //心跳设置
+                   socket_set_option($socket, SOL_SOCKET, SO_KEEPALIVE, 1);
+                   socket_set_option($socket, SOL_TCP, TCP_NODELAY, 1);
+                   restore_error_handler();
+               }
+   
+               // Non blocking.
+               //设置为非阻塞模式实现异步
+               stream_set_blocking($this->_mainSocket, 0);
+           }
+   
+           $this->resumeAccept();
+       }
+   ```  
+   
+   - 协议类文件  
+   ![protocal](images/1.png)  
+   
+   ```php   
+   暂时先不看这里
+   public function resumeAccept()
+       {
+           // Register a listener to be notified when server socket is ready to read.
+           if (static::$globalEvent && true === $this->_pauseAccept && $this->_mainSocket) {
+               if ($this->transport !== 'udp') {
+                   static::$globalEvent->add($this->_mainSocket, EventInterface::EV_READ, array($this, 'acceptConnection'));
+               } else {
+                   static::$globalEvent->add($this->_mainSocket, EventInterface::EV_READ, array($this, 'acceptUdpConnection'));
+               }
+               $this->_pauseAccept = false;
+           }
+       }
+   ```  
+   
+   - 安装信号处理器【主要是向(用户发出的信号，或是内核发出的信号)进程发起相应的信号】
+   ```php  
+    static::installSignal();
+   protected static function installSignal()
+       {
+       //只支持linux,win是不支持的
+           if (static::$_OS !== OS_TYPE_LINUX) {
+               return;
+           }
+           // stop
+           //SIGINT 2 A 键盘中断（如break键被按下） 
+           pcntl_signal(SIGINT, array('\Workerman\Worker', 'signalHandler'), false);
+           // graceful stop
+           //SIGTERM 15 A 终止信号 
+           pcntl_signal(SIGTERM, array('\Workerman\Worker', 'signalHandler'), false);
+           // reload
+           //SIGUSR1 30,10,16 A 用户自定义信号1 
+           pcntl_signal(SIGUSR1, array('\Workerman\Worker', 'signalHandler'), false);
+           // graceful reload
+           //SIGQUIT 3 C 键盘的退出键被按下 
+           pcntl_signal(SIGQUIT, array('\Workerman\Worker', 'signalHandler'), false);
+           // status
+           //SIGUSR2 31,12,17 A 用户自定义信号2
+           pcntl_signal(SIGUSR2, array('\Workerman\Worker', 'signalHandler'), false);
+           // connection status
+           //SIGIO 23,29,22 A 某I/O操作现在可以进行了(4.2 BSD) 
+           pcntl_signal(SIGIO, array('\Workerman\Worker', 'signalHandler'), false);
+           // ignore
+           pcntl_signal(SIGPIPE, SIG_IGN, false);
+       }
    ```
    
+   - 信号处理器  
+   ```php  
+    public static function signalHandler($signal)
+       {
+           switch ($signal) {
+               // Stop.
+               case SIGINT:
+                   static::$_gracefulStop = false;
+                   static::stopAll();
+                   break;
+               // Graceful stop.
+               case SIGTERM:
+                   static::$_gracefulStop = true;
+                   static::stopAll();
+                   break;
+               // Reload.
+               case SIGQUIT:
+               case SIGUSR1:
+                   if($signal === SIGQUIT){
+                       static::$_gracefulStop = true;
+                   }else{
+                       static::$_gracefulStop = false;
+                   }
+                   static::$_pidsToRestart = static::getAllWorkerPids();
+                   static::reload();
+                   break;
+               // Show status.
+               case SIGUSR2:
+                   static::writeStatisticsToStatusFile();
+                   break;
+               // Show connection status.
+               case SIGIO:
+                   static::writeConnectionsStatisticsToStatusFile();
+                   break;
+           }
+       }
+   ```  
+   
+   - static::saveMasterPid();  
+   ```php  
+    protected static function saveMasterPid()
+       {
+       //
+           if (static::$_OS !== OS_TYPE_LINUX) {
+               return;
+           }
+   
+            //得到当前进程的父进程PID
+           static::$_masterPid = posix_getpid();
+           //将父进程pid写放文件保存
+           if (false === file_put_contents(static::$pidFile, static::$_masterPid)) {
+               throw new Exception('can not save pid to ' . static::$pidFile);
+           }
+       }
+   ```  
+   
+   -  static::unlock();  
+   ```php  
+   protected static function unlock()
+       {
+       //释放锁[为啥锁住啊？上面【请看前面的】文件只允许被一个进程读写
+       //表示当你启动workerman时，这文件【启动文件】就被锁住了，你再启动【打开一个终端试你就知道了】
+       //就不可以了
+           $fd = fopen(static::$_startFile, 'r');
+           $fd && flock($fd, LOCK_UN);
+       }
+   ```  
+   - 显示启动界面 static::displayUI();  
+   
+   ```php  
+   protected static function displayUI()
+       {
+           global $argv;
+           if (in_array('-q', $argv)) {
+               return;
+           }
+           if (static::$_OS !== OS_TYPE_LINUX) {
+               static::safeEcho("----------------------- WORKERMAN -----------------------------\r\n");
+               static::safeEcho('Workerman version:'. static::VERSION. "          PHP version:". PHP_VERSION. "\r\n");
+               static::safeEcho("------------------------ WORKERS -------------------------------\r\n");
+               static::safeEcho("worker               listen                              processes status\r\n");
+               return;
+           }
+   
+           //show version
+           $line_version = 'Workerman version:' . static::VERSION . str_pad('PHP version:', 22, ' ', STR_PAD_LEFT) . PHP_VERSION . PHP_EOL;
+           !defined('LINE_VERSIOIN_LENGTH') && define('LINE_VERSIOIN_LENGTH', strlen($line_version));
+           $total_length = static::getSingleLineTotalLength();
+           $line_one = '<n>' . str_pad('<w> WORKERMAN </w>', $total_length + strlen('<w></w>'), '-', STR_PAD_BOTH) . '</n>'. PHP_EOL;
+           $line_two = str_pad('<w> WORKERS </w>' , $total_length  + strlen('<w></w>'), '-', STR_PAD_BOTH) . PHP_EOL;
+           static::safeEcho($line_one . $line_version . $line_two);
+   
+           //Show title
+           $title = '';
+           foreach(static::getUiColumns() as $column_name => $prop){
+               $key = '_max' . ucfirst(strtolower($column_name)) . 'NameLength';
+               //just keep compatible with listen name 
+               $column_name == 'socket' && $column_name = 'listen';
+               $title.= "<w>{$column_name}</w>"  .  str_pad('', static::$$key + static::UI_SAFE_LENGTH - strlen($column_name));
+           }
+           $title && static::safeEcho($title . PHP_EOL);
+   
+           //Show content
+           foreach (static::$_workers as $worker) {
+               $content = '';
+               foreach(static::getUiColumns() as $column_name => $prop){
+                   $key = '_max' . ucfirst(strtolower($column_name)) . 'NameLength';
+                   preg_match_all("/(<n>|<\/n>|<w>|<\/w>|<g>|<\/g>)/is", $worker->{$prop}, $matches);
+                   $place_holder_length = !empty($matches) ? strlen(implode('', $matches[0])) : 0;
+                   $content .= str_pad($worker->{$prop}, static::$$key + static::UI_SAFE_LENGTH + $place_holder_length);
+               }
+               $content && static::safeEcho($content . PHP_EOL);
+           }
+   
+           //Show last line
+           $line_last = str_pad('', static::getSingleLineTotalLength(), '-') . PHP_EOL;
+           !empty($content) && static::safeEcho($line_last);
+   
+           if (static::$daemonize) {
+               static::safeEcho("Input \"php $argv[0] stop\" to stop. Start success.\n\n");
+           } else {
+               static::safeEcho("Press Ctrl+C to stop. Start success.\n");
+           }
+       }
+   ```
