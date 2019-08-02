@@ -87,7 +87,7 @@ $worker->onMessage=function ($connection,$data){
 ```php  
 public static function runAll()
     {
-        static::checkSapiEnv();
+        static::checkSapiEnv();//运行模式检测 只允许cli
         static::init();
         static::lock();
         static::parseCommand();
@@ -129,26 +129,29 @@ public static function runAll()
        //这个是设置自定义错误处理方法
        //作为phper码农不可能没用过，除非你看片了
            set_error_handler(function($code, $msg, $file, $line){
+           //运行出错时，向标准输出流STDOUT写入数据
                Worker::safeEcho("$msg in file $file on line $line\n");
            });
    
            // Start file.  
            //这个不用说了吧，打印一条信息【追溯】
-           $backtrace        = debug_backtrace(); 
+           $backtrace        = debug_backtrace(); //意图是获取目前的启动文件
            //得到运行的文件名称【别说看不懂】
            static::$_startFile = $backtrace[count($backtrace) - 1]['file'];
    
             //把\【linux】/[windows】替换为_线
+            //将启动文件名称作为唯一前缀
            $unique_prefix = str_replace('/', '_', static::$_startFile);
    
            // Pid file. 
            //进程pid文件
+           //生成进程pid文件
            if (empty(static::$pidFile)) {
                static::$pidFile = __DIR__ . "/../$unique_prefix.pid";
            }
    
            // Log file.
-           //workerman日志文件
+           //生成workerman日志文件
            if (empty(static::$logFile)) {
                static::$logFile = __DIR__ . '/../workerman.log';
            }
@@ -160,7 +163,7 @@ public static function runAll()
            }
    
            // State.
-           //状态初始值
+           //状态初始值 默认值为1
            static::$_status = static::STATUS_STARTING;
    
            // For statistics.
@@ -186,7 +189,7 @@ public static function runAll()
     public static function safeEcho($msg, $decorated = false)
        {
        //这地方怎么，回事啊，看下面的解释
-           $stream = static::outputStream();
+           $stream = static::outputStream();//获取标准输出流  
            if (!$stream) {
                return false;
            }
@@ -214,7 +217,7 @@ public static function runAll()
    
    再继续  
    ```php  
-   private static function outputStream($stream = null)
+   private static function outputStream($stream = null) 获取标准输出流
        {
            if (!$stream) {
            //STDOUT是个什么东西啊？
@@ -234,8 +237,9 @@ public static function runAll()
            $stat = fstat($stream);  
            
            //检测是不是普通文件---具体解释看下面stat的解释  
-           //看不懂？那回家放牛吧
-           if (($stat['mode'] & 0170000) === 0100000) {
+           //看不懂？那回家放牛吧 
+           //0170000 是文件类型掩码 固定好的，它们可以通过stat,fstat,lstat得到文件流的结构信息
+           if (($stat['mode'] & 0170000) === 0100000) {//获取文件类型  0100000表示一般文件  注意这是8进制
                // file
                static::$_outputDecorated = false;
            } else {
@@ -496,6 +500,7 @@ public static function runAll()
        {
        //打开启动文件【就是你php xxx start的时候获取到的启动文件】
            $fd = fopen(static::$_startFile, 'r');
+           //当你启动的时候它已经打开了启动文件了，你再启动它就打印下面的错误信息给你
            
            if (!$fd || !flock($fd, LOCK_EX)) {
                static::log("Workerman[".static::$_startFile."] already running");
@@ -506,7 +511,7 @@ public static function runAll()
    
    - `static::parseCommand();`  
    ```php  
-   protected static function parseCommand()
+   protected static function parseCommand() 解析命令参数
        {
        //不是linux的话直接返回 
        //win环境下是不不会运行本方法的【记得在linux上测试】
@@ -674,7 +679,7 @@ public static function runAll()
        }
 
    ```  
-   - start启动  
+   - start启动  【创建一个守护进程】master进程 除非你杀死它否则它一直运行【只在linux下有效果】  
    ```php  
     protected static function daemonize()
        {
@@ -684,6 +689,13 @@ public static function runAll()
        //进程的创建由fork分叉函数来完成
        //进程的退出可由exit来调用
        //pcntl进程管理在win上不支持！！！具体请看官方文档手册，别在win上测试没有用的
+       /**
+       fork之后会产生一个子进程和一个父进程，主要通过进程标识来区分，进程的调度【运行顺序由操作系统的调度来控制】
+       有可能先运行父进程或是子进程，某个进程处于running状态时，其它进程就处于阻塞或是就绪状态  
+       只有这个当前这个进程处于就绪或是阻塞时其它进程就会运行，进程之间有个cpu时间分片，每个进程会运行一个cpu时间片  
+       然后再切换到其它就绪的进程运行，来回切换完成所谓的多进程同时运行假象，其实操作系统采用了虚拟化cpu,内存技术  
+       
+       **/
            if (!static::$daemonize || static::$_OS !== OS_TYPE_LINUX) {
                return;
            }
@@ -694,19 +706,21 @@ public static function runAll()
            进程的退出可使用exit返回
            **/
            $pid = pcntl_fork();
-           if (-1 === $pid) {
+           if (-1 === $pid) {//进程创建失败时扔出错误
                throw new Exception('fork fail');
            } elseif ($pid > 0) {//在父进程中返回的是子进程PID
                exit(0);//父进程退出
            }
-           //设置当前进程的session id
+           //设置当前进程的session id 
+           //将当前子进程设置为守护进程【master进程】进程组
            if (-1 === posix_setsid()) {
                throw new Exception("setsid fail");
            }
            // Fork again avoid SVR4 system regain the control of terminal.
-           //再次创建一个子进程 
+           //再次创建一个子进程 [worker进程]
            //该子进程会继续运行后面的代码
            $pid = pcntl_fork();
+           //这个进程后面的代码运行全会被接替【它是一个worker进程】  
            if (-1 === $pid) {
                throw new Exception("fork fail");
            } elseif (0 !== $pid) {
@@ -715,7 +729,7 @@ public static function runAll()
        }
    ```  
    
-   初始化worker实例  
+   初始化worker实例  【这个进程是worker进程了】
    ```php    
    
    //本方法是运行某个子进程下的，前面已经fork了一个子进程
@@ -819,14 +833,14 @@ public static function runAll()
    - listen    
    
    ```php  
-   public function listen()
+   public function listen() [创建tcp/udp,unix服务]  
        {
        //未设置监听协议时
            if (!$this->_socketName) {
                return;
            }
    
-           // Autoload.
+           // Autoload. 获取启动目录 
            // $this->_autoloadRootPath = dirname($backtrace[0]['file']);  
            //在实例化的时候，就已经得到当前启动脚本的目录了
            Autoloader::setRootPath($this->_autoloadRootPath);
@@ -881,7 +895,7 @@ public static function runAll()
                        throw new \Exception('Bad worker->transport ' . var_export($this->transport, true));
                    }
                } else {
-                   $this->transport = $scheme;
+                   $this->transport = $scheme;//tcp传输协议
                }
                
                //$this->protocol=tcp
@@ -897,9 +911,11 @@ public static function runAll()
                // SO_REUSEPORT.
                //流相关函数手册https://www.php.net/manual/zh/function.stream-context-set-option.php
                
-               if ($this->reusePort) {
+               if ($this->reusePort) {//用于处于TIME_wAIT状态的客户端地址是否立即回收启用
+               //具体可参考TCP/IP状态图
                //是否复用端口【这是流的选项配置】
                //一般设置流的连接属性，都是在创建之前设置
+               //设置流端口复用【自己去查阅一下客户端处于TIME_WAIT状态时的机制是什么】不然看不懂的
                    stream_context_set_option($this->_context, 'socket', 'so_reuseport', 1);
                }
    
@@ -1052,7 +1068,7 @@ public static function runAll()
        }
    ```  
    
-   - static::saveMasterPid();  
+   - static::saveMasterPid();  【保存主进程pid号】  【自此主进程master启动后会根据协议启动服务并处于监听状态】
    ```php  
     protected static function saveMasterPid()
        {
@@ -1138,4 +1154,358 @@ public static function runAll()
                static::safeEcho("Press Ctrl+C to stop. Start success.\n");
            }
        }
-   ```
+   ```  
+   
+-  static::forkWorkers();  
+    创建worker工作进程，上面主进程master已经启动了并且服务器已经处于LISTEN状态了，表示可以接受外部的网络连接请求了，每来一个连接请求  
+    将会创建一个工作进程来处理请求数据了。    
+    
+    linux下  
+    ```php  
+    protected static function forkWorkersForLinux()
+        {
+    
+            foreach (static::$_workers as $worker) {//如果你只是启动一个服务就只有一个 ，如果启动多个如监听多个端口就多个
+                if (static::$_status === static::STATUS_STARTING) {
+                    if (empty($worker->name)) {
+                        $worker->name = $worker->getSocketName();
+                    }
+                    $worker_name_length = strlen($worker->name);
+                    if (static::$_maxWorkerNameLength < $worker_name_length) {
+                        static::$_maxWorkerNameLength = $worker_name_length;
+                    }
+                }
+                //进程数量
+                while (count(static::$_pidMap[$worker->workerId]) < $worker->count) {
+                    static::forkOneWorkerForLinux($worker);
+                }
+            }
+        }
+        
+    protected static function forkOneWorkerForLinux($worker)
+        {
+            // Get available worker id.
+            //hash id值
+            $id = static::getId($worker->workerId, 0);
+            if ($id === false) {
+                return;
+            }
+            //创建一个worker工作进程
+            $pid = pcntl_fork();
+            // For master process.
+            if ($pid > 0) {
+            //父进程  
+            //功能是保存子进程的进程号
+            //根据worker从而获取它下面所有的进程id   
+            
+                static::$_pidMap[$worker->workerId][$pid] = $pid;
+                static::$_idMap[$worker->workerId][$id]   = $pid;
+            } // For child processes.
+            elseif (0 === $pid) {
+                srand();//随机因子
+                mt_srand();
+                if ($worker->reusePort) {
+                    $worker->listen();
+                }
+                if (static::$_status === static::STATUS_STARTING) {
+                    static::resetStd();
+                }
+                static::$_pidMap  = array();
+                // Remove other listener.
+                foreach(static::$_workers as $key => $one_worker) {
+                    if ($one_worker->workerId !== $worker->workerId) {
+                        $one_worker->unlisten();
+                        unset(static::$_workers[$key]);
+                    }
+                }
+                Timer::delAll();
+                static::setProcessTitle('WorkerMan: worker process  ' . $worker->name . ' ' . $worker->getSocketName());
+                $worker->setUserAndGroup();
+                $worker->id = $id;
+                $worker->run();//运行worker进程
+                $err = new Exception('event-loop exited');
+                static::log($err);
+                exit(250);
+            } else {
+                throw new Exception("forkOneWorker fail");
+            }
+        }
+        
+    public function run()
+        {
+            //Update process state.
+            static::$_status = static::STATUS_RUNNING;
+    
+            // Register shutdown function for checking errors.
+            register_shutdown_function(array("\\Workerman\\Worker", 'checkErrors'));
+    
+    //设置自动加载目录 
+            // Set autoload root path.
+            Autoloader::setRootPath($this->_autoloadRootPath);
+    
+            // Create a global event loop.
+            if (!static::$globalEvent) {
+            //默认得到select 事件模型io复用类
+                $event_loop_class = static::getEventLoopName();
+                static::$globalEvent = new $event_loop_class;
+                $this->resumeAccept();
+            }
+    
+            // Reinstall signal.
+            static::reinstallSignal();
+    
+            // Init Timer.
+            Timer::init(static::$globalEvent);
+    
+            // Set an empty onMessage callback.
+            if (empty($this->onMessage)) {
+                $this->onMessage = function () {};
+            }
+    
+            restore_error_handler();
+            
+            // Try to emit onWorkerStart callback.
+            //执行启动回调
+            if ($this->onWorkerStart) {
+                try {
+                    call_user_func($this->onWorkerStart, $this);
+                } catch (\Exception $e) {
+                    static::log($e);
+                    // Avoid rapid infinite loop exit.
+                    sleep(1);
+                    exit(250);
+                } catch (\Error $e) {
+                    static::log($e);
+                    // Avoid rapid infinite loop exit.
+                    sleep(1);
+                    exit(250);
+                }
+            }
+    
+            // Main loop.
+            static::$globalEvent->loop();
+        }
+        
+    protected static function getEventLoopName()
+        {
+            if (static::$eventLoopClass) {
+                return static::$eventLoopClass;
+            }
+            /**
+            protected static $_availableEventLoops = array(
+                    'libevent' => '\Workerman\Events\Libevent',
+                    'event'    => '\Workerman\Events\Event'
+                    // Temporarily removed swoole because it is not stable enough  
+                    //'swoole'   => '\Workerman\Events\Swoole'
+                );
+            swoole的可以不用管了
+            **/
+            if (!class_exists('\Swoole\Event', false)) {
+            //
+                unset(static::$_availableEventLoops['swoole']);
+            }
+            
+            $loop_name = '';
+            foreach (static::$_availableEventLoops as $name=>$class) {
+            //检测是否安装了event,libevent扩展【没有默认就是select】
+                if (extension_loaded($name)) {
+                    $loop_name = $name;
+                    break;
+                }
+            }
+            //
+            if ($loop_name) {
+                if (interface_exists('\React\EventLoop\LoopInterface')) {
+                    switch ($loop_name) {
+                        case 'libevent':
+                            static::$eventLoopClass = '\Workerman\Events\React\ExtLibEventLoop';
+                            break;
+                        case 'event':
+                            static::$eventLoopClass = '\Workerman\Events\React\ExtEventLoop';
+                            break;
+                        default :
+                            static::$eventLoopClass = '\Workerman\Events\React\StreamSelectLoop';
+                            break;
+                    }
+                } else {
+                    static::$eventLoopClass = static::$_availableEventLoops[$loop_name];
+                }
+            } else {
+            //默认使用select IO复用
+                static::$eventLoopClass = interface_exists('\React\EventLoop\LoopInterface')? '\Workerman\Events\React\StreamSelectLoop':'\Workerman\Events\Select';
+            }
+            return static::$eventLoopClass;
+        }  
+        
+    
+    ```  
+    
+    - select 实例化时【如果你使用workerman安装了libevent,event就不用看这里了】  
+    ```php  
+    namespace Workerman\Events;
+    
+    /**
+     * select eventloop
+     */
+    class Select implements EventInterface
+    {
+        /**
+         * All listeners for read/write event.
+         *
+         * @var array
+         */
+        public $_allEvents = array();
+    
+        /**
+         * Event listeners of signal.
+         *
+         * @var array
+         */
+        public $_signalEvents = array();
+    
+        /**
+         * Fds waiting for read event.
+         *
+         * @var array
+         */
+        protected $_readFds = array();
+    
+        /**
+         * Fds waiting for write event.
+         *
+         * @var array
+         */
+        protected $_writeFds = array();
+    
+        /**
+         * Fds waiting for except event.
+         *
+         * @var array
+         */
+        protected $_exceptFds = array();
+    
+        /**
+         * Timer scheduler.
+         * {['data':timer_id, 'priority':run_timestamp], ..}
+         *
+         * @var \SplPriorityQueue
+         */
+        protected $_scheduler = null;
+    
+        /**
+         * All timer event listeners.
+         * [[func, args, flag, timer_interval], ..]
+         *
+         * @var array
+         */
+        protected $_eventTimer = array();
+    
+        /**
+         * Timer id.
+         *
+         * @var int
+         */
+        protected $_timerId = 1;
+    
+        /**
+         * Select timeout.
+         *
+         * @var int
+         */
+        protected $_selectTimeout = 100000000;
+    
+        /**
+         * Paired socket channels
+         *
+         * @var array
+         */
+        protected $channel = array();
+    
+        /**
+         * Construct.
+         */
+        public function __construct()
+        {
+        //创建一个socket双向通信管道  
+        //可以实现进程间相互通信
+            // Create a pipeline and put into the collection of the read to read the descriptor to avoid empty polling.
+            $this->channel = stream_socket_pair(DIRECTORY_SEPARATOR === '/' ? STREAM_PF_UNIX : STREAM_PF_INET,
+                STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+            if($this->channel) {
+                stream_set_blocking($this->channel[0], 0);
+                $this->_readFds[0] = $this->channel[0];
+            }
+            // Init SplPriorityQueue.
+            //创建一个优先级队列【使用用时可以根据优先级从队列里取出】   
+            $this->_scheduler = new \SplPriorityQueue();
+            //设置队列数据元素出队模式
+            $this->_scheduler->setExtractFlags(\SplPriorityQueue::EXTR_BOTH);
+        }  
+        
+    //该worker进程将处于无限循环状态，但它还是子进程即worker工作进程
+    public function loop()【当前进程是worker进程并且一直运行，直接没事干就处于就绪或是阻塞状态】
+        {
+            while (1) {
+                if(DIRECTORY_SEPARATOR === '/') {
+                    // Calls signal handlers for pending signals
+                    //https://www.php.net/manual/zh/function.pcntl-signal-dispatch.php  
+                    //信号分发
+                    pcntl_signal_dispatch();
+                }
+    
+    //读管道
+                $read  = $this->_readFds;
+                //写管道
+                $write = $this->_writeFds;
+                $except = $this->_exceptFds;
+    
+                // Waiting read/write/signal/timeout events.
+                set_error_handler(function(){});
+                
+                //不断的循环调用，直接内核接受的数据复制到用户空间，并给读写管道复制了数据
+                //多路IO复用
+                $ret = stream_select($read, $write, $except, 0, $this->_selectTimeout);
+                restore_error_handler();
+    
+    
+                if (!$this->_scheduler->isEmpty()) {
+                    $this->tick();
+                }
+    
+                if (!$ret) {
+                    continue;
+                }
+                //数据返回了
+                if ($read) {
+                    foreach ($read as $fd) {
+                        $fd_key = (int)$fd;
+                        if (isset($this->_allEvents[$fd_key][self::EV_READ])) {
+                            call_user_func_array($this->_allEvents[$fd_key][self::EV_READ][0],
+                                array($this->_allEvents[$fd_key][self::EV_READ][1]));
+                        }
+                    }
+                }
+    
+                if ($write) {
+                    foreach ($write as $fd) {
+                        $fd_key = (int)$fd;
+                        if (isset($this->_allEvents[$fd_key][self::EV_WRITE])) {
+                            call_user_func_array($this->_allEvents[$fd_key][self::EV_WRITE][0],
+                                array($this->_allEvents[$fd_key][self::EV_WRITE][1]));
+                        }
+                    }
+                }
+    
+                if($except) {
+                    foreach($except as $fd) {
+                        $fd_key = (int) $fd;
+                        if(isset($this->_allEvents[$fd_key][self::EV_EXCEPT])) {
+                            call_user_func_array($this->_allEvents[$fd_key][self::EV_EXCEPT][0],
+                                array($this->_allEvents[$fd_key][self::EV_EXCEPT][1]));
+                        }
+                    }
+                }
+            }
+        }
+    ``` 
+    
