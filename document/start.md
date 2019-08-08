@@ -6,7 +6,7 @@
 /**
  * Created by PhpStorm.
  * User: 1655664358@qq.com
- * Date: 2019/7/10
+ * Date: 2018/1/10
  * Time: 21:53
  */
 
@@ -48,10 +48,11 @@ $worker->onMessage=function ($connection,$data){
              $this->_socketName = $socket_name;
              //流配置选项
              //tcp协议是基于字节流的传输，采用应答机制 
-             //低层可通过调用set_socket_opt选项【c语言】控制
+             //低层可通过调用set_socket_opt选项【socket api】控制
              //也可以修改内核配置[linux内核] 
              //从而控制文件描述符的属性 
-             //上层协议可以是http,ws,https,这些协议
+             //上层协议可以是http,ws,https,这些协议 
+             //backlog 修改内核接受缓存器队列大小
              if (!isset($context_option['socket']['backlog'])) {
                  $context_option['socket']['backlog'] = static::DEFAULT_BACKLOG;
              }
@@ -103,7 +104,7 @@ public static function runAll()
     }
 ```  
 
-   -  static::checkSapiEnv();分析    
+   -  static::checkSapiEnv();检测运行模式 仅限cli控制终端
    源码  
    ```php  
    protected static function checkSapiEnv()
@@ -398,7 +399,7 @@ public static function runAll()
    
    初始化id  
    ```php  
-   protected static function initId()
+   protected static function initId() 存储worker实例，每个实例初始化其进程数
        {
        /**
        new Wokrer()实例化的时候初始化了这3坨变量
@@ -679,7 +680,7 @@ public static function runAll()
        }
 
    ```  
-   - start启动  【创建一个守护进程】master进程 除非你杀死它否则它一直运行【只在linux下有效果】  
+   - start启动  【创建一个守护进程】master进程 除非你杀死(只能通过信号)它否则它一直运行【只在linux下有效果】  
    ```php  
     protected static function daemonize()
        {
@@ -746,16 +747,16 @@ public static function runAll()
                exit(0);//父进程退出  组长进程退出
            }
            
-           //将当前子进程设置为守护进程【master进程】进程组
-           //创建一个会话，彻底脱离控制终端    
+           //创建一个会话，彻底脱离控制终端     当前进程为会话首领进程
            if (-1 === posix_setsid()) {
                throw new Exception("setsid fail");
            }
-           // Fork again avoid SVR4 system regain the control of terminal.
-           //再次创建一个进程   
+           // Fork again avoid SVR4 system regain the control of terminal. 
+           //此进程已经脱离了原来的会话终端，不在继承原来的会话了
+           //再次创建一个进程组  
            //该子进程会继续运行后面的代码
            $pid = pcntl_fork();
-           //这个进程后面的代码运行全会被接替【它是一个worker进程】  
+           //这个进程后面的代码运行全会被接替
            if (-1 === $pid) {
                throw new Exception("fork fail");
            } elseif (0 !== $pid) {
@@ -768,6 +769,9 @@ public static function runAll()
    ```php    
    
    //本方法是运行某个子进程下的，前面已经fork了一个子进程
+   /**
+   分别设置worker实例的运行状态，运行用户，socket流，并启动tcp/udp服务
+   **/
    protected static function initWorkers()
        {
        //同样检测系统环境
@@ -780,6 +784,7 @@ public static function runAll()
                    static::$_workers[$this->workerId] = $this;
                    static::$_pidMap[$this->workerId]  = array();
            **/
+           //worker实例【可以搞多个实例，每个实例可以设置工作进程数量】
            foreach (static::$_workers as $worker) {
                // Worker name. 
                // public $name = 'none';  用户在实例时如果设置了name的话就使用用户设置的内容
@@ -866,7 +871,7 @@ public static function runAll()
    ```  
    
    - listen    
-   
+   每个worker实例
    ```php  
    public function listen() [创建tcp/udp,unix服务]  
        {
@@ -1191,7 +1196,8 @@ public static function runAll()
        }
    ```  
    
--  static::forkWorkers();  
+-  static::forkWorkers();   
+    循环每个worker实例，并得到每个worker实例要启动的进程数量 创建其工作进程
     创建worker工作进程，上面主进程master已经启动了并且服务器已经处于LISTEN状态了，表示可以接受外部的网络连接请求了，每来一个连接请求  
     将会创建一个工作进程来处理请求数据了。    
     
@@ -1210,7 +1216,7 @@ public static function runAll()
                         static::$_maxWorkerNameLength = $worker_name_length;
                     }
                 }
-                //进程数量
+                //每个worker实例要启动的进程
                 while (count(static::$_pidMap[$worker->workerId]) < $worker->count) {
                     static::forkOneWorkerForLinux($worker);
                 }
@@ -1232,7 +1238,7 @@ public static function runAll()
             //父进程  
             //功能是保存子进程的进程号
             //根据worker从而获取它下面所有的进程id   
-            
+                //保存每个worker实例的进程id
                 static::$_pidMap[$worker->workerId][$pid] = $pid;
                 static::$_idMap[$worker->workerId][$id]   = $pid;
             } // For child processes.
@@ -1300,7 +1306,7 @@ public static function runAll()
             restore_error_handler();
             
             // Try to emit onWorkerStart callback.
-            //执行启动回调
+            //深度执行启动worker进程启动回调
             if ($this->onWorkerStart) {
                 try {
                     call_user_func($this->onWorkerStart, $this);
@@ -1375,7 +1381,24 @@ public static function runAll()
     
     ```  
     
-    - select 实例化时【如果你使用workerman安装了libevent,event就不用看这里了】  
+    - select 实例化时【如果你使用workerman安装了libevent,event就不用看这里了】   
+    IO模型【同步阻塞，同步非阻塞，信号驱动，异步IO，多路复用】【5种的你可以百度】  
+    同步阻塞：表示你要等着，等客户端连接来你才开始处理数据，你什么事情都不能做，进程就挂起来   
+    进程状态：running,就绪，阻塞  
+    某个进程阻塞时，cpu就跑去运行其它进程了，直接你这个进程就绪了【就是有客户端连接上来了，它再跑过来运行】  
+    进程的调度策略由内核控制，linux是多任务系统，进程的运行要么就是抢占式或是轮转方式给每个进程运行一定的时间片  
+    内核采用的数据结构有的会有队列来实现进程调度   
+    异步：这种方式就是一种通知机制，相当于它不在等客户端连接了，由内核来管理，有客户端连接上来后，内核会通知你有生意了  
+    典型的事件通知  
+    同步就是典型的等待，期间什么事也不做就傻坐着。  
+    阻塞：当调用accept时它就是阻塞模式  
+    多路复用：也是阻塞，只不过由内核来轮询数据是否准备好了，多路复用一般有select,epoll,poll  
+    异步IO:由内核通知用户进程，异步IO库可以用libevent  
+    
+    所以就2种情况：一种是用户空间的应用进程像个傻子一样的等数据，等内核返回数据   
+    【你最好去查找一下资料内核是怎么运行一个进程的】  
+    一种呢是用户空间的应用程序不等了，我发起了读请求，我就去装逼了，你【内核】什么时候准备好钱了就打电话给我。   
+    
     ```php  
     namespace Workerman\Events;
     
@@ -1477,14 +1500,14 @@ public static function runAll()
             $this->_scheduler->setExtractFlags(\SplPriorityQueue::EXTR_BOTH);
         }  
         
-    //该worker进程将处于无限循环状态，但它还是子进程即worker工作进程
+    //该worker进程将处于无限循环【轮询】多路非阻塞IO轮询状态，但它还是子进程即worker工作进程
     public function loop()【当前进程是worker进程并且一直运行，直接没事干就处于就绪或是阻塞状态】
         {
             while (1) {
                 if(DIRECTORY_SEPARATOR === '/') {
                     // Calls signal handlers for pending signals
                     //https://www.php.net/manual/zh/function.pcntl-signal-dispatch.php  
-                    //信号分发
+                    //信号调度处理
                     pcntl_signal_dispatch();
                 }
     
@@ -1496,17 +1519,21 @@ public static function runAll()
     
                 // Waiting read/write/signal/timeout events.
                 set_error_handler(function(){});
-                
-                //不断的循环调用，直接内核接受的数据复制到用户空间，并给读写管道复制了数据
-                //多路IO复用
+                   //屏蔽错误处理
+                //内核不断的循环，直接内核接受的数据复制到用户空间，数据准备完成时再返回
+                //多路IO复用  
+                //如果你用workerman安装了livevent的话它是采用异步通知方式的  不过你得安装libevent库  
+                //linux有的版本内置支持select,epool,pool这些【具体怎么用请百度】   
                 $ret = stream_select($read, $write, $except, 0, $this->_selectTimeout);
                 restore_error_handler();
     
-    
+                //定时队列处理  
+                //队列算法可以百度一下【有的人整天用队列不可能不清楚算法】   
                 if (!$this->_scheduler->isEmpty()) {
                     $this->tick();
                 }
-    
+                //如果说内核返回了正数说明数据已经准备好了，否则要么超时了没有返回则继续阻塞 
+                //循环调用stream_select一直等到有数据为止【就是内核准备好的数据】   
                 if (!$ret) {
                     continue;
                 }
@@ -1514,7 +1541,12 @@ public static function runAll()
                 if ($read) {
                     foreach ($read as $fd) {
                         $fd_key = (int)$fd;
+                        //客户端文件描述符就绪时
+                        //$this->_allEvents[socket流][1] = [[Worker实例对象，acceptConnection方法],$socket流文件描述符];
+                        //$fd_key = 前面创建的socket流时
+                        //此时调用Worker->acceptConnection(前面创建的socket流);
                         if (isset($this->_allEvents[$fd_key][self::EV_READ])) {
+                            //$this->_allEvents[$fd_key][self::EV_READ][0] == 
                             call_user_func_array($this->_allEvents[$fd_key][self::EV_READ][0],
                                 array($this->_allEvents[$fd_key][self::EV_READ][1]));
                         }
@@ -1542,5 +1574,833 @@ public static function runAll()
                 }
             }
         }
-    ``` 
+    ```   
+    给socket流添加相应的读写readFds,writeFds处理函数
+    ```php  
+     public function add($fd, $flag, $func, $args = array())
+        {
+            switch ($flag) {
+            
+            
+                case self::EV_READ:
+                case self::EV_WRITE:
+                
+                    //这个socket读写池最大1024个   
+                    //这是一个文件描述符池  
+                    //主要用于后面的stream_select [c语言用select(socketfd+1,&reads,&writes,&exceptions,timeout)  
+                    //fd_zero,fd_set,fd_isset 这是c的专用
+                    $count = $flag === self::EV_READ ? count($this->_readFds) : count($this->_writeFds);
+                    if ($count >= 1024) {
+                        echo "Warning: system call select exceeded the maximum number of connections 1024, please install event/libevent extension for more connections.\n";
+                    } else if (DIRECTORY_SEPARATOR !== '/' && $count >= 256) {
+                        echo "Warning: system call select exceeded the maximum number of connections 256.\n";
+                    }
+                    
+                    
+                    $fd_key                           = (int)$fd;
+                    /**
+                    $this->_allEvents[socket流][1] = [[Worker实例对象，acceptConnection方法],$socket流文件描述符];
+                    **/
+                    $this->_allEvents[$fd_key][$flag] = array($func, $fd);
+                    
+                    
+                    if ($flag === self::EV_READ) {
+                    //static::$globalEvent->add($this->_mainSocket, EventInterface::EV_READ, array($this, 'acceptConnection'));
+                    // $this->_readFds[$fd_key] =$fd_key = 前面创建的socket流
+                        $this->_readFds[$fd_key] = $fd;
+                    } else {
+                        $this->_writeFds[$fd_key] = $fd;
+                    }
+                    
+                    
+                    break;
+                case self::EV_EXCEPT:
+                    $fd_key = (int)$fd;
+                    $this->_allEvents[$fd_key][$flag] = array($func, $fd);
+                    $this->_exceptFds[$fd_key] = $fd;
+                    break;
+                case self::EV_SIGNAL:
+                    // Windows not support signal.
+                    if(DIRECTORY_SEPARATOR !== '/') {
+                        return false;
+                    }
+                    $fd_key                              = (int)$fd;
+                    $this->_signalEvents[$fd_key][$flag] = array($func, $fd);
+                    pcntl_signal($fd, array($this, 'signalHandler'));
+                    break;
+                case self::EV_TIMER:
+                case self::EV_TIMER_ONCE:
+                    $timer_id = $this->_timerId++;
+                    $run_time = microtime(true) + $fd;
+                    $this->_scheduler->insert($timer_id, -$run_time);
+                    $this->_eventTimer[$timer_id] = array($func, (array)$args, $flag, $fd);
+                    $select_timeout = ($run_time - microtime(true)) * 1000000;
+                    if( $this->_selectTimeout > $select_timeout ){ 
+                        $this->_selectTimeout = $select_timeout;   
+                    }  
+                    return $timer_id;
+            }
+    
+            return true;
+        }
+
+    ```  
+    
+    - acceptConnection接受客户端连接  并把worker实例的东西复制给连接 
+    ```php  
+    public function acceptConnection($socket)
+        {
+            // Accept a connection on server socket.
+            //错误屏蔽处理
+            set_error_handler(function(){});
+            //接受客户端的连接socket 
+            //$remote_address 客户端的信息如ip，端口那些玩意 
+            //客户端发起连接时，端口是随机分配的  
+            //客户端是如何发起连接的，可以看本人在laravel中国社区发布的文章看一下，就是它们之间的连接过程   
+            $new_socket = stream_socket_accept($socket, 0, $remote_address);
+            restore_error_handler();
+    
+            // Thundering herd.
+            if (!$new_socket) {
+                return;
+            }
+    
+            //实例化TCp连接实例
+            // TcpConnection.
+            $connection                         = new TcpConnection($new_socket, $remote_address);
+            //保存连接实例
+            $this->connections[$connection->id] = $connection;  
+            //当前连接属于哪个worker[因为你可能会实例化多个worker实例]
+            $connection->worker                 = $this;
+            //协议
+            $connection->protocol               = $this->protocol;
+            $connection->transport              = $this->transport;  
+            //得到你在worker实例上设置的onMessage函数回调   下面的回调一样        
+            $connection->onMessage              = $this->onMessage;
+            $connection->onClose                = $this->onClose;
+            $connection->onError                = $this->onError;
+            $connection->onBufferDrain          = $this->onBufferDrain;
+            $connection->onBufferFull           = $this->onBufferFull;
+    
+            // Try to emit onConnect callback.  
+            //尝试运行连接
+            if ($this->onConnect) {
+                try {
+                    call_user_func($this->onConnect, $connection);
+                } catch (\Exception $e) {
+                    static::log($e);
+                    exit(250);
+                } catch (\Error $e) {
+                    static::log($e);
+                    exit(250);
+                }
+            }
+        }
+
+    ```  
+    
+    - TCPConnection实例
+    ```php  
+    /**
+     * This file is part of workerman.
+     *
+     * Licensed under The MIT License
+     * For full copyright and license information, please see the MIT-LICENSE.txt
+     * Redistributions of files must retain the above copyright notice.
+     *
+     * @author    walkor<walkor@workerman.net>
+     * @copyright walkor<walkor@workerman.net>
+     * @link      http://www.workerman.net/
+     * @license   http://www.opensource.org/licenses/mit-license.php MIT License
+     */
+    namespace Workerman\Connection;
+    
+    use Workerman\Events\EventInterface;
+    use Workerman\Worker;
+    use Exception;
+    
+    /**
+     * TcpConnection.
+     */
+    class TcpConnection extends ConnectionInterface
+    {
+        /**
+         * Read buffer size.
+         *
+         * @var int
+         */
+        const READ_BUFFER_SIZE = 65535;
+    
+        /**
+         * Status initial.
+         *
+         * @var int
+         */
+        const STATUS_INITIAL = 0;
+    
+        /**
+         * Status connecting.
+         *
+         * @var int
+         */
+        const STATUS_CONNECTING = 1;
+    
+        /**
+         * Status connection established.
+         *
+         * @var int
+         */
+        const STATUS_ESTABLISHED = 2;
+    
+        /**
+         * Status closing.
+         *
+         * @var int
+         */
+        const STATUS_CLOSING = 4;
+    
+        /**
+         * Status closed.
+         *
+         * @var int
+         */
+        const STATUS_CLOSED = 8;
+    
+        /**
+         * Emitted when data is received.
+         *
+         * @var callback
+         */
+        public $onMessage = null;
+    
+        /**
+         * Emitted when the other end of the socket sends a FIN packet.
+         *
+         * @var callback
+         */
+        public $onClose = null;
+    
+        /**
+         * Emitted when an error occurs with connection.
+         *
+         * @var callback
+         */
+        public $onError = null;
+    
+        /**
+         * Emitted when the send buffer becomes full.
+         *
+         * @var callback
+         */
+        public $onBufferFull = null;
+    
+        /**
+         * Emitted when the send buffer becomes empty.
+         *
+         * @var callback
+         */
+        public $onBufferDrain = null;
+    
+        /**
+         * Application layer protocol.
+         * The format is like this Workerman\\Protocols\\Http.
+         *
+         * @var \Workerman\Protocols\ProtocolInterface
+         */
+        public $protocol = null;
+    
+        /**
+         * Transport (tcp/udp/unix/ssl).
+         *
+         * @var string
+         */
+        public $transport = 'tcp';
+    
+        /**
+         * Which worker belong to.
+         *
+         * @var Worker
+         */
+        public $worker = null;
+    
+        /**
+         * Bytes read.
+         *
+         * @var int
+         */
+        public $bytesRead = 0;
+    
+        /**
+         * Bytes written.
+         *
+         * @var int
+         */
+        public $bytesWritten = 0;
+    
+        /**
+         * Connection->id.
+         *
+         * @var int
+         */
+        public $id = 0;
+    
+        /**
+         * A copy of $worker->id which used to clean up the connection in worker->connections
+         *
+         * @var int
+         */
+        protected $_id = 0;
+    
+        /**
+         * Sets the maximum send buffer size for the current connection.
+         * OnBufferFull callback will be emited When the send buffer is full.
+         *
+         * @var int
+         */
+        public $maxSendBufferSize = 1048576;
+    
+        /**
+         * Default send buffer size.
+         *
+         * @var int
+         */
+        public static $defaultMaxSendBufferSize = 1048576;
+    
+        /**
+         * Sets the maximum acceptable packet size for the current connection.
+         *
+         * @var int
+         */
+        public $maxPackageSize = 1048576;
+        
+        /**
+         * Default maximum acceptable packet size.
+         *
+         * @var int
+         */
+        public static $defaultMaxPackageSize = 10485760;
+    
+        /**
+         * Id recorder.
+         *
+         * @var int
+         */
+        protected static $_idRecorder = 1;
+    
+        /**
+         * Socket
+         *
+         * @var resource
+         */
+        protected $_socket = null;
+    
+        /**
+         * Send buffer.
+         *
+         * @var string
+         */
+        protected $_sendBuffer = '';
+    
+        /**
+         * Receive buffer.
+         *
+         * @var string
+         */
+        protected $_recvBuffer = '';
+    
+        /**
+         * Current package length.
+         *
+         * @var int
+         */
+        protected $_currentPackageLength = 0;
+    
+        /**
+         * Connection status.
+         *
+         * @var int
+         */
+        protected $_status = self::STATUS_ESTABLISHED;
+    
+        /**
+         * Remote address.
+         *
+         * @var string
+         */
+        protected $_remoteAddress = '';
+    
+        /**
+         * Is paused.
+         *
+         * @var bool
+         */
+        protected $_isPaused = false;
+    
+        /**
+         * SSL handshake completed or not.
+         *
+         * @var bool
+         */
+        protected $_sslHandshakeCompleted = false;
+    
+        /**
+         * All connection instances.
+         *
+         * @var array
+         */
+        public static $connections = array();
+    
+        /**
+         * Status to string.
+         *
+         * @var array
+         */
+        public static $_statusToString = array(
+            self::STATUS_INITIAL     => 'INITIAL',
+            self::STATUS_CONNECTING  => 'CONNECTING',
+            self::STATUS_ESTABLISHED => 'ESTABLISHED',
+            self::STATUS_CLOSING     => 'CLOSING',
+            self::STATUS_CLOSED      => 'CLOSED',
+        );
+    
+    
+        /**
+         * Adding support of custom functions within protocols
+         *
+         * @param string $name
+         * @param array  $arguments
+         * @return void
+         */
+        public function __call($name, $arguments) {
+            // Try to emit custom function within protocol
+            if (method_exists($this->protocol, $name)) {
+                try {
+                    return call_user_func(array($this->protocol, $name), $this, $arguments);
+                } catch (\Exception $e) {
+                    Worker::log($e);
+                    exit(250);
+                } catch (\Error $e) {
+                    Worker::log($e);
+                    exit(250);
+                }
+            }
+        }
+    
+        /**
+         * Construct.
+         *
+         * @param resource $socket  客户端文件描述符
+         * @param string   $remote_address
+         */
+        public function __construct($socket, $remote_address = '')
+        {
+            //连接数量计算
+            self::$statistics['connection_count']++;  
+            //连接记录  
+            $this->id = $this->_id = self::$_idRecorder++;
+            //define ('PHP_INT_MAX', 9223372036854775807);
+            if(self::$_idRecorder === PHP_INT_MAX){
+                self::$_idRecorder = 0;
+            }
+            //保存当前的客户端文件描述符
+            $this->_socket = $socket;
+            //设置为非阻塞模式，就是调用后就返回，绝不等待   
+            stream_set_blocking($this->_socket, 0);
+            // Compatible with hhvm
+            if (function_exists('stream_set_read_buffer')) {
+                stream_set_read_buffer($this->_socket, 0);
+            }
+            //再注册读写方法  
+            //readFds文件集合池  这个时候$this->_socket仅仅只是客户端 等伙要运行baseRead
+            Worker::$globalEvent->add($this->_socket, EventInterface::EV_READ, array($this, 'baseRead'));
+            $this->maxSendBufferSize        = self::$defaultMaxSendBufferSize;
+            $this->maxPackageSize           = self::$defaultMaxPackageSize;
+            //保存远程客户端信息
+            $this->_remoteAddress           = $remote_address;
+            //存储连接实例
+            static::$connections[$this->id] = $this;
+        }
+    ```  
+    
+    - 准备读取客户端的数据  TCPCONNECTION实例并按http规则解析获取内容并运行你设置的onMessage回调函数    
+    ```php 
+    public function baseRead($socket, $check_eof = true)
+        {
+            // SSL handshake. 
+            //ssl安全握手协议【后面再扯】   
+            if ($this->transport === 'ssl' && $this->_sslHandshakeCompleted !== true) {
+                if ($this->doSslHandshake($socket)) {
+                    $this->_sslHandshakeCompleted = true;
+                    if ($this->_sendBuffer) {
+                        Worker::$globalEvent->add($socket, EventInterface::EV_WRITE, array($this, 'baseWrite'));
+                    }
+                } else {
+                    return;
+                }
+            }
+            //同样的屏蔽处理，防止读过程出现问题  
+            set_error_handler(function(){});
+            //读取客户端的数据 此时$socket是客户端，不是前面创建的socket了【你得认真看代码，不然你认为一样】   
+            $buffer = fread($socket, self::READ_BUFFER_SIZE);
+            restore_error_handler();
+    
+            // Check connection closed.
+            //文件描述池的移除+关闭客户端连接【你最好去看一下tcp连接的过程和关闭的过程以及状态说明，可以看
+            //本人在laravel社区发布的内容，不看算球】   
+            if ($buffer === '' || $buffer === false) {
+                if ($check_eof && (feof($socket) || !is_resource($socket) || $buffer === false)) {
+                    $this->destroy();
+                    return;
+                }
+            } else {
+            //接受数据
+                $this->bytesRead += strlen($buffer);
+                $this->_recvBuffer .= $buffer;
+            }
+    
+            // If the application layer protocol has been set up.  
+            //$this->protocol 是什么？认真看前面的解释应该懂了  
+            //http,https这些上层的协议【是毛线协议，不过是人为的封装叫个名字，你去撸一下tcp监听一下80端口就行这就是http协议了
+            //只不过http协议客户端发起的时候会有请求头，请求行，请求内容  
+            //服务器返回的时候也按头，行，内容方式返回，就是设置响应头，状态码和一些key:value形式以及加是2个大空格再返回内容  
+            //你最好去撸一下tcp监听80端口试试就知道了，不要跟我扯什么垃圾http【^_^】   
+            if ($this->protocol !== null) {
+                $parser = $this->protocol;
+                //开始用Http类处理接受到的数据了，【按http所谓的协议解析数据】  
+                //所以你可以随便整，数据按什么方式传输你就按什么方式解析【http协议就是大家约定的破规则】 
+                //你不想受规则约束就自己整一个【不要跟问我http是什么东西】好吗，你都看到这里了啊老表   
+                
+                while ($this->_recvBuffer !== '' && !$this->_isPaused) {
+                    // The current packet length is known.
+                    if ($this->_currentPackageLength) {
+                        // Data is not enough for a package.
+                        if ($this->_currentPackageLength > strlen($this->_recvBuffer)) {
+                            break;
+                        }
+                    } else {
+                        // Get current package length.
+                        set_error_handler(function($code, $msg, $file, $line){
+                            Worker::safeEcho("$msg in file $file on line $line\n");
+                        });
+                        
+                        //获取请求头+请求行的总长度  
+                        $this->_currentPackageLength = $parser::input($this->_recvBuffer, $this);
+                        restore_error_handler();
+                        // The packet length is unknown.
+                        if ($this->_currentPackageLength === 0) {
+                            break;
+                        } elseif ($this->_currentPackageLength > 0 && $this->_currentPackageLength <= $this->maxPackageSize) {
+                            // Data is not enough for a package.
+                            if ($this->_currentPackageLength > strlen($this->_recvBuffer)) {
+                                break;
+                            }
+                        } // Wrong package.
+                        else {
+                            Worker::safeEcho('error package. package_length=' . var_export($this->_currentPackageLength, true));
+                            $this->destroy();
+                            return;
+                        }
+                    }
+    
+                    // The data is enough for a packet.
+                    self::$statistics['total_request']++;
+                    // The current packet length is equal to the length of the buffer.
+                    if (strlen($this->_recvBuffer) === $this->_currentPackageLength) {
+                        $one_request_buffer = $this->_recvBuffer;
+                        $this->_recvBuffer  = '';
+                    } else {
+                        // Get a full package from the buffer.
+                        
+                         //把请求头，请求行去掉，获取用户请求的内容   
+                        $one_request_buffer = substr($this->_recvBuffer, 0, $this->_currentPackageLength);
+                        // Remove the current package from the receive buffer.
+                        
+                        //把请求头，请求行去掉，获取用户请求的内容   
+                        $this->_recvBuffer = substr($this->_recvBuffer, $this->_currentPackageLength);
+                    }
+                    // Reset the current packet length to 0.
+                    $this->_currentPackageLength = 0;
+                    if (!$this->onMessage) {
+                        continue;
+                    }
+                    try {
+                        // Decode request buffer before Emitting onMessage callback.  
+                        //调用你的onMessage函数
+                        //$this->onMessage 你设置的破回调函数
+                        //$this  TCpconnection对象  
+                        //decode 请求内容解析自己去看【你看这么多了就不能自己看嘛】   
+                        call_user_func($this->onMessage, $this, $parser::decode($one_request_buffer, $this));
+                    } catch (\Exception $e) {
+                        Worker::log($e);
+                        exit(250);
+                    } catch (\Error $e) {
+                        Worker::log($e);
+                        exit(250);
+                    }
+                }
+                return;
+            }
+    
+            if ($this->_recvBuffer === '' || $this->_isPaused) {
+                return;
+            }
+               //计算总的请求次数
+            // Applications protocol is not set.
+            self::$statistics['total_request']++;
+            if (!$this->onMessage) {
+                $this->_recvBuffer = '';
+                return;
+            }
+            try {
+                call_user_func($this->onMessage, $this, $this->_recvBuffer);
+            } catch (\Exception $e) {
+                Worker::log($e);
+                exit(250);
+            } catch (\Error $e) {
+                Worker::log($e);
+                exit(250);
+            }
+            // Clean receive buffer.
+            $this->_recvBuffer = '';
+        }
+    ```  
+    
+    读写文件描述符池的删除    
+    撸过c的朋友早就知道FD_SET,FD_ISSET,FD_SET,FD_ZER,FD_CLR了专门用于对read,write读写池处理的   
+    因为多路复用select函数【stream_select】要用   
+    ```php  
+    public function destroy()
+        {
+            // Avoid repeated calls.  
+            //状态清除
+            if ($this->_status === self::STATUS_CLOSED) {
+                return;
+            }
+            // Remove event listener.  
+            //移除该socket即客户端
+            Worker::$globalEvent->del($this->_socket, EventInterface::EV_READ);
+            Worker::$globalEvent->del($this->_socket, EventInterface::EV_WRITE);
+    
+            // Close socket.
+            set_error_handler(function(){});
+            //关闭客户端的连接【关闭时tcp发送了FIN的结束报文，他们之间的状态说明可以看本人发过的文章，不看就算】   
+            fclose($this->_socket);
+            restore_error_handler();
+    
+            $this->_status = self::STATUS_CLOSED;
+            // Try to emit onClose callback.  
+            //运行onClose回调函数
+            if ($this->onClose) {
+                try {
+                //并且给onClose传递当前连接TcpConnection实例
+                    call_user_func($this->onClose, $this);
+                } catch (\Exception $e) {
+                    Worker::log($e);
+                    exit(250);
+                } catch (\Error $e) {
+                    Worker::log($e);
+                    exit(250);
+                }
+            }
+            // Try to emit protocol::onClose
+            if ($this->protocol && method_exists($this->protocol, 'onClose')) {
+                try {
+                    call_user_func(array($this->protocol, 'onClose'), $this);
+                } catch (\Exception $e) {
+                    Worker::log($e);
+                    exit(250);
+                } catch (\Error $e) {
+                    Worker::log($e);
+                    exit(250);
+                }
+            }
+            $this->_sendBuffer = $this->_recvBuffer = '';
+            if ($this->_status === self::STATUS_CLOSED) {
+                // Cleaning up the callback to avoid memory leaks.
+                //清空该连接的回调函数
+                $this->onMessage = $this->onClose = $this->onError = $this->onBufferFull = $this->onBufferDrain = null;
+                // Remove from worker->connections.
+                if ($this->worker) {
+                //移除该进程下的某个连接实例
+                    unset($this->worker->connections[$this->_id]);
+                }
+                //移除当前连接
+                unset(static::$connections[$this->_id]);
+            }
+        }
+    ```  
+    
+    - 所谓的http协议解析【为什么叫所谓，这个玩意只是大家约定的一个规则，因为浏览器发起的内容就是，是什么，我不想说了】   
+    ```php  
+    class Http
+    {
+        /**
+          * The supported HTTP methods
+          * @var array
+          */
+        public static $methods = array('GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS');
+    
+        /**
+         * Check the integrity of the package.
+         *
+         * @param string        $recv_buffer
+         * @param TcpConnection $connection
+         * @return int
+         */
+        public static function input($recv_buffer, TcpConnection $connection)
+        {
+        //内容处理  为什么检测2个大的空格换行啊【自己去百度http头部协议格式】   
+            if (!strpos($recv_buffer, "\r\n\r\n")) {
+                // Judge whether the package length exceeds the limit.
+                if (strlen($recv_buffer) >= $connection->maxPackageSize) {
+                    $connection->close();
+                    return 0;
+                }
+                return 0;
+            }
+            //内容分隔，因为请求头，请求行，请求内容【麻烦你自己看请求格式】记得百度哦   
+            list($header,) = explode("\r\n\r\n", $recv_buffer, 2);
+            $method = substr($header, 0, strpos($header, ' '));
+            //请求方法
+            if(in_array($method, static::$methods)) {
+                return static::getRequestSize($header, $method);
+            }else{
+            //请求方法错误时给你发送这句话
+                $connection->send("HTTP/1.1 400 Bad Request\r\n\r\n", true);
+                return 0;
+            }
+        }  
+        
+    protected static function getRequestSize($header, $method)
+        {
+            if($method === 'GET' || $method === 'OPTIONS' || $method === 'HEAD') {
+                return strlen($header) + 4;
+            }
+            $match = array();
+            //返回请求头+请求内容长度    
+            if (preg_match("/\r\nContent-Length: ?(\d+)/i", $header, $match)) {
+                $content_length = isset($match[1]) ? $match[1] : 0;
+                return $content_length + strlen($header) + 4;
+            }
+            return $method === 'DELETE' ? strlen($header) + 4 : 0;
+        }
+    ```  
+    
+    - send方法【fwrite写数据】   
+    ````php  
+    public function send($send_buffer, $raw = false)
+        {
+            if ($this->_status === self::STATUS_CLOSING || $this->_status === self::STATUS_CLOSED) {
+                return false;
+            }
+            //同样的内容发送前做一些封装处理
+            // Try to call protocol::encode($send_buffer) before sending.
+            if (false === $raw && $this->protocol !== null) {
+                $parser      = $this->protocol;
+                $send_buffer = $parser::encode($send_buffer, $this);
+                if ($send_buffer === '') {
+                    return null;
+                }
+            }
+    
+            if ($this->_status !== self::STATUS_ESTABLISHED ||
+                ($this->transport === 'ssl' && $this->_sslHandshakeCompleted !== true)
+            ) {
+                if ($this->_sendBuffer) {
+                    if ($this->bufferIsFull()) {
+                        self::$statistics['send_fail']++;
+                        return false;
+                    }
+                }
+                $this->_sendBuffer .= $send_buffer;
+                $this->checkBufferWillFull();
+                return null;
+            }
+    
+            // Attempt to send data directly.
+            if ($this->_sendBuffer === '') {
+                if ($this->transport === 'ssl') {
+                    Worker::$globalEvent->add($this->_socket, EventInterface::EV_WRITE, array($this, 'baseWrite'));
+                    $this->_sendBuffer = $send_buffer;
+                    $this->checkBufferWillFull();
+                    return null;
+                }
+                set_error_handler(function(){});
+                //向客户端流写数据【发送数据了】成功时返回数据长度
+                $len = fwrite($this->_socket, $send_buffer);
+                restore_error_handler();
+                // send successful.
+                //发送成功后即可返回
+                if ($len === strlen($send_buffer)) {
+                    $this->bytesWritten += $len;
+                    return true;
+                }
+                // Send only part of the data.
+                if ($len > 0) {
+                    $this->_sendBuffer = substr($send_buffer, $len);
+                    $this->bytesWritten += $len;
+                } else {
+                    // Connection closed?  发送失败的处理
+                    if (!is_resource($this->_socket) || feof($this->_socket)) {
+                        self::$statistics['send_fail']++;
+                        if ($this->onError) {
+                            try {
+                            //运行你的onError函数
+                                call_user_func($this->onError, $this, WORKERMAN_SEND_FAIL, 'client closed');
+                            } catch (\Exception $e) {
+                                Worker::log($e);
+                                exit(250);
+                            } catch (\Error $e) {
+                                Worker::log($e);
+                                exit(250);
+                            }
+                        }
+                        $this->destroy();
+                        return false;
+                    }
+                    $this->_sendBuffer = $send_buffer;
+                }
+                Worker::$globalEvent->add($this->_socket, EventInterface::EV_WRITE, array($this, 'baseWrite'));
+                // Check if the send buffer will be full.
+                $this->checkBufferWillFull();
+                return null;
+            } else {
+                if ($this->bufferIsFull()) {
+                    self::$statistics['send_fail']++;
+                    return false;
+                }
+    
+                $this->_sendBuffer .= $send_buffer;
+                // Check if the send buffer is full.
+                $this->checkBufferWillFull();
+            }
+        }
+
+    ````    
+    -monitorWorkersForLinux   监听子进程状态退出时重新创建   
+    
+    源码大概总结：  
+    1、使用者勿必了解进程是如何运行的，最起码了解一个进程内核是如何调用的，了解常规的调度策略。  
+    2、了解内核队列调度算法【了解何谓cpu虚拟化，内存虚拟化】  
+    3、了解进程组，进组组长，会话，会话首领，控制终端，守护进程，前台进程组，后台进程组，作业的相关概念    
+    3、了解文件流IO的操作   
+    4、了解进程信息有哪些，如有效用户，真实用户，有效组，真实组的区别是什么，了解进程内存模型等。   
+    5、了解可执行文件内存模型，内核分配内存原理。    
+    6、了解tcp,udp,ip，了解应用层，传输层，数据链路层【网卡驱动原理】，ARP这些，了解tcp和udp的区别，了解tcp和udp  
+    连接时的状态转移情况，了解如何抓包，如何监听tcp数据包传输，了解相关socket api     
+    7、了解中断系统，便于理解信号控制原理。     
+    8、了解IO处理单元，了解一些reactor,proactor   
+    9、了解IO模型，了解同步，异步，阻塞，非阻塞【最好去搞清楚进程如何控制，进程状态，进程调度算法这些】   
+    10、了解流的概念，知道什么是文件流，输入流，输出流，这些玩意，了解轮询这些   
+    11、了解异步事件驱动。       
+    12、了解http请求和响应的格式【便于你编写符合该协议的响应代码】，了解之后你才了解所谓的自定义协议。   
+    
+    如果说以上内容你并没有怎么了解，可能阅读起来相当麻烦，还好我给你做了注解，但注解是在你有基础的时候再来看比较好。    
+    所以勿必搞清楚tcp/ip和多进程    
+    
+    以上内容注解为本人在周末以及空闲时间做的注解，udp协议和unix本地域协议可自行阅读其源码【道理是一样的】   
+    如果注解有误可以pr，谢谢。    
+    
+    在你阅读过程，最好去编写源码测试【最好在linux上测试，不要拿win来哄小孩子，好吗】    
+    
     
