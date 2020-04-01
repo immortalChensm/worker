@@ -21,7 +21,7 @@ $options = array(
     )
 );
 
-$uri = "http://127.0.0.1:1234";
+$uri = "http://localhost/test.php";
 $context = stream_context_create($options);
 $result = file_get_contents($uri,false,$context);
 echo $result;

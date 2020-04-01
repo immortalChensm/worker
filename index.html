@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+
+<div style="margin: auto auto">
+
+</div>
+<script src="jquery.min.js"></script>
+<script>
+
+    $.ajax({
+        type: "POST",
+        url: "http://47.110.136.62:9501/api/community/hot",
+        dataType:"json",
+        data: {
+            
+        },
+        success:function(respond){
+            
+            if (respond){
+                var data = respond['result']['data'];
+                var html;
+                for (var item in data){
+                    html+="<p>"+data[item]['title']+"</p>"+
+                    "<p>"+data[item]['content']+"</p>";
+
+                    for (var k in data[item]['uriLink']){
+
+                        if (data[item]['article']<3){
+                            html+="<p><img src='"+data[item]['uriLink'][k]+"'/></p>";
+                        } else{
+                            html+="<p><video src='"+data[item]['uriLink'][k]+"' autoplay controls></video></p>";
+                        }
+
+                    }
+                }
+
+                $("div").append(html);
+            } 
+        },
+        error:function(error){
+
+        }
+    });
+</script>
+</body>
+</html>

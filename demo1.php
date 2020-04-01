@@ -17,3 +17,10 @@ $worker->onMessage=function ($connection,$data){
 };
 
 \Workerman\Worker::runAll();
+
+$a = [
+    'a'=>'b',
+    'c'=>13
+];
+
+echo json_encode($a);
