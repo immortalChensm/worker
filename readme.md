@@ -2,6 +2,8 @@
 
 - **[workerman渣渣分析篇](document/start.md)**  
 - **[专业级终结分析篇](document/run.md)**   
+- **[涉及libevent高性能网络框架库c源码分析](https://github.com/immortalChensm/libevent)** 
+
  
 ## 本人此次更新重点专业陈述各行代码，以专业化角度来阅读此网络框架 
 ## 仅对传输层协议和select I/O复用以及libevent框架运行流程做了详细解释
