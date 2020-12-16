@@ -1,15 +1,8 @@
-### workerman工作原理源码分析  
+### workerman code source analysis  
+just do simple analysis,more info pls conact me
 
-- **[workerman渣渣分析篇](document/start.md)**  
-- **[专业级终结分析篇](document/run.md)**   
-- **[涉及libevent高性能网络框架库c源码分析](https://github.com/immortalChensm/libevent)** 
 
- 
-## 本人此次更新重点专业陈述各行代码，以专业化角度来阅读此网络框架 
-## 仅对传输层协议和select I/O复用以及libevent框架运行流程做了详细解释
-## 应用层协议【laravel社区大把教你怎么用php实现http,websocket,text,自定义协议各种骚玩法
-本人不在重复了】  
-## 作者：1655664358@qq.com 最勺的颠颠   
+## 作者：1655664358@qq.com 
  
 在你阅读注解的过程中你可以参考一下是否了解以下内容，便于你更好的阅读。
 1、了解进程是如何运行的，最起码了解一个进程内核是如何调用的，了解常规的调度策略。      
